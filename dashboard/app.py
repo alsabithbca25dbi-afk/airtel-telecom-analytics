@@ -4,7 +4,7 @@ Domain D · Group 4
 Entry-point: streamlit run dashboard/app.py
 """
 
-import base64, pathlib, sqlite3
+import base64, gzip, json, pathlib, sqlite3
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -133,12 +133,34 @@ def _style_fig(fig: go.Figure) -> go.Figure:
 # 1.  Database helper  q()
 # ──────────────────────────────────────────────────────────────
 DB_PATH = pathlib.Path(__file__).resolve().parent.parent / "data" / "raw" / "airtel.db"
+LITE_PATH = pathlib.Path(__file__).resolve().parent / "airtel_data.json.gz"
+
+
+@st.cache_resource
+def _cloud_conn() -> sqlite3.Connection:
+    """Build an in-memory SQLite DB from airtel_data.json.gz when airtel.db is absent (e.g. Streamlit Cloud)."""
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    data = json.loads(gzip.decompress(LITE_PATH.read_bytes()).decode("utf-8"))
+    conn.execute(
+        "CREATE TABLE complaints (complaint_id INTEGER, customer_id INTEGER, "
+        "complaint_date TEXT, category TEXT, channel TEXT, is_resolved INTEGER, resolution_days REAL)"
+    )
+    conn.executemany("INSERT INTO complaints VALUES (?,?,?,?,?,?,?)", data["complaints"])
+    conn.execute(
+        "CREATE TABLE customer_features (customer_id INTEGER, circle_name TEXT, region TEXT, "
+        "age_band TEXT, connection_type TEXT, is_churned INTEGER, complaint_count INTEGER, unresolved_count INTEGER)"
+    )
+    conn.executemany("INSERT INTO customer_features VALUES (?,?,?,?,?,?,?,?)", data["customer_features"])
+    conn.commit()
+    return conn
 
 
 def q(sql: str, params: tuple = ()) -> pd.DataFrame:
-    """Run *sql* against the project SQLite database and return a DataFrame."""
-    with sqlite3.connect(str(DB_PATH)) as conn:
-        return pd.read_sql_query(sql, conn, params=params)
+    """Run *sql* against the project SQLite database (or cloud fallback) and return a DataFrame."""
+    if DB_PATH.exists() and DB_PATH.stat().st_size > 0:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            return pd.read_sql_query(sql, conn, params=params)
+    return pd.read_sql_query(sql, _cloud_conn(), params=params)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -146,10 +168,10 @@ def q(sql: str, params: tuple = ()) -> pd.DataFrame:
 # ──────────────────────────────────────────────────────────────
 st.sidebar.markdown("### Filters")
 
-conn_types = ["All"] + q("SELECT DISTINCT connection_type FROM customers ORDER BY 1")["connection_type"].tolist()
+conn_types = ["All"] + q("SELECT DISTINCT connection_type FROM customer_features ORDER BY 1")["connection_type"].tolist()
 sel_conn = st.sidebar.selectbox("Customer Type", conn_types, index=0)
 
-regions = ["All"] + q("SELECT DISTINCT region FROM circles ORDER BY 1")["region"].tolist()
+regions = ["All"] + q("SELECT DISTINCT region FROM customer_features ORDER BY 1")["region"].tolist()
 sel_region = st.sidebar.selectbox("Region", regions, index=0)
 
 
